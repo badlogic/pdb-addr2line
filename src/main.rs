@@ -3,7 +3,6 @@ use std::io::Write;
 
 use getopts::Options;
 use std::collections::BTreeMap;
-use msvc_demangler;
 
 use pdb::{FallibleIterator, SymbolData, PDB, LineProgram, AddressMap};
 
@@ -50,107 +49,18 @@ where
     Ok(lines)
 }
 
-
-
-fn print_nearest_symbol(mut symbols: pdb::SymbolIter<'_>, address_map: &pdb::AddressMap, target: u32) -> pdb::Result<()> {
-
-    let mut nearest_symbol = None;
-
-    while let Some(symbol) = symbols.next()? {
-        match symbol.parse() {
-            Ok(SymbolData::Procedure(proc)) => {
-                //proc_offsets.push((depth, proc.offset));
-
-                match proc.offset.to_rva(&address_map) {
-
-                    Some(start) if start.0 <= target && target < start.0 + proc.len => {
-                        let sign = if proc.global { "+" } else { "-" };
-                        println!("{} {} {:?} {}", sign, proc.name, proc.offset.to_rva(&address_map), proc.len);
-                    }
-                    Some(_) => {
-                        //println!("{:?} {} {}", proc.offset.to_rva(&address_map), proc.name, proc.len);
-                        //println!("{} {:?} {:?} {} {:?} {}", sign, symbol.index(), proc.type_index, proc.name, proc.offset.to_rva(&address_map), proc.len);
-                    }
-                    _ => {
-                        println!("error");
-
-                    }
-                }
-            }
-            Ok(SymbolData::Public(symbol)) => {
-                match symbol.offset.to_rva(&address_map) {
-                    Some(rva) => {
-                        if let Some((offset,_)) = nearest_symbol {
-                            if rva.0 > offset && rva.0 < target {
-                                nearest_symbol = Some((rva.0, symbol));
-                            }
-                        } else {
-                            nearest_symbol = Some((rva.0, symbol));
-                        }
-                    }
-                    _ => {
-                        println!("error");
-
-                    }
-                }
-            }
-            _ => {  }
-        }
-    }
-
-    if let Some((off, sym)) = nearest_symbol {
-        let flags = msvc_demangler::DemangleFlags::NAME_ONLY;
-        let result = msvc_demangler::demangle(&sym.name.to_string(), flags).unwrap();
-        println!("sym {:x} {}", off, result);
-    }
-    
-
-    Ok(())
-}
-
-use std::fs::File;
-fn find_symbol(mut pdb: PDB<File>, target: u32) -> pdb::Result<()> {
-    let symbol_table = pdb.global_symbols()?;
-    let mut address_map = pdb.address_map()?;
-
-    println!("Global symbols:");
-    print_nearest_symbol(symbol_table.iter(), &mut address_map, target)?;
-
-    println!("Module private symbols:");
-    let dbi = pdb.debug_information()?;
-    let mut modules = dbi.modules()?;
-    while let Some(module) = modules.next()? {
-        //println!("Module: {}", module.object_file_name());
-        let info = match pdb.module_info(&module)? {
-            Some(info) => info,
-            None => {
-                //println!("  no module info");
-                continue;
-            }
-        };
-
-        print_nearest_symbol(info.symbols()?, &mut address_map, target)?;
-    }
-    Ok(())
-}
-
-
-fn dump_pdb(filename: &str, target: u32) -> pdb::Result<()> {
+fn dump_pdb(filename: &str, targets: Vec<u32>) -> pdb::Result<()> {
     let file = std::fs::File::open(filename)?;
     let mut pdb = PDB::open(file)?;
 
-
+    let target = targets[0];
     let address_map = pdb.address_map()?;
     let string_table = pdb.string_table();
     let string_table = match string_table {
         Ok(string_table) => string_table,
-        _ => {
-            println!("no string table using symbols");
-            return find_symbol(pdb, target);
-        }
+        _ => panic!("No string table in .pdb.")
     };
 
-    println!("Module private symbols:");
     let dbi = pdb.debug_information()?;
     let ipi = pdb.id_information()?;
 
@@ -196,23 +106,21 @@ fn dump_pdb(filename: &str, target: u32) -> pdb::Result<()> {
                     
                     match proc.offset.to_rva(&address_map) {
                         Some(start) if start.0 <= target && target < start.0 + proc.len => {
-                            let sign = if proc.global { "+" } else { "-" };
-                            println!("{} {:?} {:?} {} {:?} {}", sign, symbol.index(), proc.type_index, proc.name, proc.offset.to_rva(&address_map), proc.len);
+                            print!("{}", proc.name);
 
                             let mut lines = program.lines_at_offset(proc.offset).peekable();
                             while let Some(line_info) = lines.next()? {
                                 let rva = line_info.offset.to_rva(&address_map).expect("invalid rva");
-                                let length = line_info.length;
                                 let file_info = program.get_file_info(line_info.file_index)?;
                                 let file_name = file_info.name.to_string_lossy(&string_table)?;
                                 match lines.peek()? {
                                     Some(info) => {
                                         if rva.0 <= target && info.offset.to_rva(&address_map).expect("invalid rva").0 > target {
-                                            println!("  {} {:?} {}:{}", rva, length, file_name, line_info.line_start);
+                                            println!(" ({}:{})", file_name, line_info.line_start);
                                             break;
                                         }
                                     }
-                                    _ => println!("  {} {:?} {}:{}", rva, length, file_name, line_info.line_start),
+                                    _ => println!(" ({}:{})", file_name, line_info.line_start),
                                 };
                             }
                         }
@@ -264,17 +172,21 @@ fn main() {
         Err(f) => panic!(f.to_string()),
     };
 
-    let (filename, address) = if matches.free.len() == 2 {
-        (&matches.free[0], &matches.free[1])
+    let (filename, addresses_str) = if matches.free.len() >= 2 {
+        (&matches.free[0], &matches.free[1..])
     } else {
         //print_usage(&program, opts);
         println!("specify path to a PDB");
         return;
     };
-    let address = address.trim_start_matches("0x");
-    let address = u32::from_str_radix(address, 16).unwrap();
 
-    match dump_pdb(&filename, address) {
+    let mut addresses: Vec<u32> = Vec::new();
+    for address_str in addresses_str {
+        let address = u32::from_str_radix(address_str.trim_start_matches("0x"), 16).unwrap();
+        addresses.push(address);
+    }
+
+    match dump_pdb(&filename, addresses) {
         Ok(_) => {}
         Err(e) => {
             writeln!(&mut std::io::stderr(), "error dumping PDB: {}", e).expect("stderr write");
