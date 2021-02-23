@@ -155,6 +155,11 @@ fn dump_pdb(filename: &str, targets: Vec<u32>) -> pdb::Result<()> {
                                                         found_inlinee = true;
                                                         break;
                                                     }
+                                                    Ok(pdb::IdData::MemberFunction(i)) => {
+                                                        println!("{:#x} {} ({}:{})", target, i.name, l.file, l.line);
+                                                        found_inlinee = true;
+                                                        break;
+                                                    }
                                                     _ => {}
                                                 }
                                                 // func_name = p.
