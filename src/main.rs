@@ -53,7 +53,6 @@ fn dump_pdb(filename: &str, targets: Vec<u32>) -> pdb::Result<()> {
     let file = std::fs::File::open(filename)?;
     let mut pdb = PDB::open(file)?;
 
-    let target = targets[0];
     let address_map = pdb.address_map()?;
     let string_table = pdb.string_table();
     let string_table = match string_table {
@@ -105,23 +104,26 @@ fn dump_pdb(filename: &str, targets: Vec<u32>) -> pdb::Result<()> {
                     proc_offsets.push((depth, proc.offset));
                     
                     match proc.offset.to_rva(&address_map) {
-                        Some(start) if start.0 <= target && target < start.0 + proc.len => {
-                            print!("{}", proc.name);
+                        Some(start) => {
+                            for target in &targets {
+                                if start.0 <= *target && *target < start.0 + proc.len {
 
-                            let mut lines = program.lines_at_offset(proc.offset).peekable();
-                            while let Some(line_info) = lines.next()? {
-                                let rva = line_info.offset.to_rva(&address_map).expect("invalid rva");
-                                let file_info = program.get_file_info(line_info.file_index)?;
-                                let file_name = file_info.name.to_string_lossy(&string_table)?;
-                                match lines.peek()? {
-                                    Some(info) => {
-                                        if rva.0 <= target && info.offset.to_rva(&address_map).expect("invalid rva").0 > target {
-                                            println!(" ({}:{})", file_name, line_info.line_start);
-                                            break;
-                                        }
+                                    let mut lines = program.lines_at_offset(proc.offset).peekable();
+                                    while let Some(line_info) = lines.next()? {
+                                        let rva = line_info.offset.to_rva(&address_map).expect("invalid rva");
+                                        let file_info = program.get_file_info(line_info.file_index)?;
+                                        let file_name = file_info.name.to_string_lossy(&string_table)?;
+                                        match lines.peek()? {
+                                            Some(info) => {
+                                                if rva.0 <= *target && info.offset.to_rva(&address_map).expect("invalid rva").0 > *target {
+                                                    println!("{:#x} {} ({}:{})", target, proc.name, file_name, line_info.line_start);
+                                                    break;
+                                                }
+                                            }
+                                            _ => println!("{:#x} {} ({}:{})", target, proc.name, file_name, line_info.line_start),
+                                        };
                                     }
-                                    _ => println!(" ({}:{})", file_name, line_info.line_start),
-                                };
+                                }
                             }
                         }
                         _ => {}
@@ -141,14 +143,27 @@ fn dump_pdb(filename: &str, targets: Vec<u32>) -> pdb::Result<()> {
                         let line_iter = inlinee.lines(parent_offset, &site);
                         let lines = collect_lines(line_iter, &program, &address_map, &string_table)?;
                         for l in lines {
-                            if l.address <= target.into() && l.address + l.size.unwrap() > target.into() {
-                                println!("{:?} ({:x?} {:x} {:x?}) {:?}", l, l.address,target, l.address + l.size.unwrap(), site.inlinee);
-                                for i in ipi.iter().iterator() {
-                                    if let Ok(i) = i {
-                                        if i.index() == site.inlinee {
-                                            println!("{:?}", i.parse()?)
+                            for target in &targets {
+                                if l.address <= (*target).into() && l.address + l.size.unwrap() > (*target).into() {
+                                    let mut found_inlinee = false;
+                                    for i in ipi.iter().iterator() {
+                                        if let Ok(i) = i {
+                                            if i.index() == site.inlinee {
+                                                match i.parse() {
+                                                    Ok(pdb::IdData::Function(i)) => {
+                                                        println!("{:#x} {} ({}:{})", target, i.name, l.file, l.line);
+                                                        found_inlinee = true;
+                                                        break;
+                                                    }
+                                                    _ => {}
+                                                }
+                                                // func_name = p.
+                                                break;
+                                            }
                                         }
                                     }
+
+                                    if !found_inlinee { println!("{:#x} {} ({}:{})", target, "unknown_inline_function", l.file, l.line); }
                                 }
                             }
                         }
